@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # Function to check for IPv4 availability
-check_ip_versions() {
+check_ipv4_availability() {
     IPV4_AVAILABLE=$(ip -4 addr show | grep inet | wc -l)
 
     if [ "$IPV4_AVAILABLE" -gt 0 ]; then
         echo "IPv4 is available."
     else
-        echo "IPv4 is not available."
+        echo "IPv4 is not available. Exiting."
         exit 1
     fi
 }
@@ -54,94 +54,60 @@ username-as-common-name
 EOF
 }
 
-# Stop and disable the OpenVPN service if running
-sudo systemctl stop openvpn@server
-sudo systemctl disable openvpn@server
+# Function to clean up previous OpenVPN configurations
+cleanup_openvpn() {
+    sudo systemctl stop openvpn@server-ipv4
+    sudo systemctl disable openvpn@server-ipv4
+    sudo rm -rf /etc/openvpn
+    sudo rm -rf /var/log/openvpn*
+}
 
-# Clean up any existing OpenVPN configurations
-sudo rm -rf /etc/openvpn
-sudo rm -rf /var/log/openvpn*
+# Function to reinstall OpenVPN
+install_openvpn() {
+    sudo apt-get update
+    sudo apt-get install -y openvpn easy-rsa net-tools
+}
 
-# Reinstall OpenVPN and install necessary tools
-sudo apt-get update
-sudo apt-get install -y openvpn easy-rsa net-tools
+# Function to set up the PKI and generate keys
+setup_pki() {
+    sudo mkdir -p /etc/openvpn
+    sudo cp -r /usr/share/easy-rsa /etc/openvpn/easy-rsa
+    cd /etc/openvpn/easy-rsa
 
-# Set up the OpenVPN server configuration directory
-sudo mkdir -p /etc/openvpn
-sudo cp -r /usr/share/easy-rsa /etc/openvpn/easy-rsa
-cd /etc/openvpn/easy-rsa
+    sudo ./easyrsa init-pki
+    sudo ./easyrsa --batch build-ca nopass
+    sudo ./easyrsa build-server-full server nopass
+    sudo ./easyrsa gen-dh
+    sudo openvpn --genkey --secret /etc/openvpn/ta.key
+    sudo ./easyrsa build-client-full client1 nopass
 
-# Initialize the PKI (Public Key Infrastructure)
-sudo ./easyrsa init-pki
+    sudo cp pki/ca.crt pki/dh.pem pki/issued/server.crt pki/private/server.key /etc/openvpn/
+}
 
-# Build the Certificate Authority (CA)
-sudo ./easyrsa --batch build-ca nopass
+# Function to configure IP forwarding
+configure_ip_forwarding() {
+    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+    sudo sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
+    sudo sysctl -p
+}
 
-# Generate the server certificate and key
-sudo ./easyrsa build-server-full server nopass
-if [ $? -ne 0 ]; then
-    echo "Error generating server certificate and key"
-    exit 1
-fi
+# Function to configure the firewall
+configure_firewall() {
+    sudo ufw allow 443/tcp
+    sudo ufw allow OpenSSH
+    sudo ufw disable
+    sudo ufw enable
+    sudo ufw allow routed
+}
 
-# Generate Diffie-Hellman parameters
-sudo ./easyrsa gen-dh
-if [ $? -ne 0 ]; then
-    echo "Error generating Diffie-Hellman parameters"
-    exit 1
-fi
+# Function to generate the client configuration file
+generate_client_config() {
+    USER_HOME=$(eval echo ~${SUDO_USER})
+    PUBLIC_IP=$(curl -s ifconfig.me)
+    SERVER_NAME=${PUBLIC_IP//./-}
+    CLIENT_CONFIG_PATH="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
 
-# Generate a shared TLS key for HMAC authentication
-sudo openvpn --genkey --secret /etc/openvpn/ta.key
-if [ $? -ne 0 ]; then
-    echo "Error generating TLS key"
-    exit 1
-fi
-
-# Generate client certificate and key
-sudo ./easyrsa build-client-full client1 nopass
-if [ $? -ne 0 ]; then
-    echo "Error generating client certificate and key"
-    exit 1
-fi
-
-# Move generated keys and certificates to the OpenVPN directory
-sudo cp pki/ca.crt pki/dh.pem pki/issued/server.crt pki/private/server.key /etc/openvpn/
-
-# Check for IPv4 availability
-check_ip_versions
-
-# Configure OpenVPN for IPv4 only
-configure_openvpn_ipv4
-
-# Configure IP forwarding
-echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-sudo sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
-sudo sysctl -p
-
-# Set up firewall rules
-sudo ufw allow 443/tcp
-sudo ufw allow OpenSSH
-sudo ufw disable
-sudo ufw enable
-sudo ufw allow routed
-
-# Start and enable the OpenVPN service
-sudo systemctl start openvpn@server-ipv4
-if [ $? -ne 0 ]; then
-    echo "Error starting OpenVPN service"
-    exit 1
-fi
-sudo systemctl enable openvpn@server-ipv4
-
-# Set the home directory for the client.ovpn file based on the user running the script
-USER_HOME=$(eval echo ~${SUDO_USER})
-PUBLIC_IP=$(curl -s ifconfig.me)
-SERVER_NAME=${PUBLIC_IP//./-}
-CLIENT_CONFIG_PATH="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
-
-# Generate the client configuration file
-cat << EOF > ${CLIENT_CONFIG_PATH}
+    cat << EOF > ${CLIENT_CONFIG_PATH}
 client
 dev tun
 proto tcp
@@ -172,7 +138,24 @@ $(sudo cat /etc/openvpn/ta.key)
 key-direction 1
 EOF
 
-# Print out the location of the client configuration file and scp command
-echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
-echo "To download the configuration file, use the following scp command:"
-echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH} ~/Downloads"
+    echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
+    echo "To download the configuration file, use the following scp command:"
+    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH} ~/Downloads"
+}
+
+# Main script execution
+cleanup_openvpn
+install_openvpn
+setup_pki
+check_ipv4_availability
+configure_openvpn_ipv4
+configure_ip_forwarding
+configure_firewall
+
+# Start the OpenVPN service
+sudo systemctl daemon-reload
+sudo systemctl start openvpn@server-ipv4
+sudo systemctl enable openvpn@server-ipv4
+
+# Generate the client configuration file
+generate_client_config
