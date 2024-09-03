@@ -73,7 +73,7 @@ key server.key
 dh dh.pem
 tls-auth ta.key 0
 server 10.8.0.0 255.255.255.0
-mtu $MTU
+tun-mtu $MTU
 mssfix $((MTU-40))
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 8.8.8.8"
