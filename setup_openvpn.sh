@@ -146,21 +146,15 @@ test_openvpn_foreground() {
     sudo /usr/sbin/openvpn --config /etc/openvpn/server-ipv4.conf --verb 7
 }
 
-# Function to clean up previous configurations
-cleanup_previous() {
-    # Stop and disable the OpenVPN service if running
-    sudo systemctl stop openvpn@server-ipv4
-    sudo systemctl stop openvpn@server-ipv6
-    sudo systemctl disable openvpn@server-ipv4
-    sudo systemctl disable openvpn@server-ipv6
+# Stop and disable the OpenVPN service if running
+sudo systemctl stop openvpn@server-ipv4
+sudo systemctl stop openvpn@server-ipv6
+sudo systemctl disable openvpn@server-ipv4
+sudo systemctl disable openvpn@server-ipv6
 
-    # Clean up any existing OpenVPN configurations and logs
-    sudo rm -rf /etc/openvpn
-    sudo rm -rf /var/log/openvpn*
-}
-
-# Clean up previous configurations
-cleanup_previous
+# Clean up any existing OpenVPN configurations
+sudo rm -rf /etc/openvpn
+sudo rm -rf /var/log/openvpn*
 
 # Reinstall OpenVPN and install necessary tools
 sudo apt-get update
@@ -208,10 +202,6 @@ fi
 # Move generated keys and certificates to the OpenVPN directory
 sudo cp pki/ca.crt pki/dh.pem pki/issued/server.crt pki/private/server.key /etc/openvpn/
 
-# Ensure correct permissions for the ta.key file
-sudo chmod 644 /etc/openvpn/ta.key
-sudo chown root:root /etc/openvpn/ta.key
-
 # Check for IPv4 and IPv6 availability
 check_ip_versions
 
@@ -221,19 +211,49 @@ prompt_user_for_config
 # Configure OpenVPN based on user choice
 configure_openvpn
 
-# If not in test mode, generate the client configuration files and start the service
+# Configure IP forwarding
+echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+sudo sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
+sudo sysctl -p
+
+# Set up firewall rules
+sudo ufw allow 443/tcp
+sudo ufw allow OpenSSH
+sudo ufw disable
+sudo ufw enable
+sudo ufw allow routed
+
+# Start and enable the OpenVPN services
 if [ "$CONFIG_CHOICE" -ne 4 ]; then
-    PUBLIC_IP=$(curl -s ifconfig.me)
-    SERVER_NAME=${PUBLIC_IP//./-}
-    
+    sudo systemctl daemon-reload
+    sudo systemctl start openvpn@server-ipv4
+    sudo systemctl enable openvpn@server-ipv4
+
+    if [ "$CONFIG_CHOICE" -eq 3 ]; then
+        sudo systemctl start openvpn@server-ipv6
+        sudo systemctl enable openvpn@server-ipv6
+    fi
+fi
+
+# If not in foreground testing mode, generate client configuration files
+if [ "$CONFIG_CHOICE" -ne 4 ]; then
+    # Set the home directory for the client.ovpn file based on the user running the script
+    USER_HOME=$(eval echo ~${SUDO_USER})
+    PUBLIC_IPV4=$(curl -s -4 ifconfig.me)
+    PUBLIC_IPV6=$(curl -s -6 ifconfig.me)
+    SERVER_NAME_IPV4=${PUBLIC_IPV4//./-}
+    SERVER_NAME_IPV6=${PUBLIC_IPV6//:/-}
+
+    CLIENT_CONFIG_PATH_IPV4="${USER_HOME}/client-${SERVER_NAME_IPV4}-ipv4.ovpn"
+    CLIENT_CONFIG_PATH_IPV6="${USER_HOME}/client-${SERVER_NAME_IPV6}-ipv6.ovpn"
+
     # Generate the client configuration file for IPv4
     if [ "$CONFIG_CHOICE" -eq 1 ] || [ "$CONFIG_CHOICE" -eq 3 ]; then
-        CLIENT_CONFIG_PATH_IPV4="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
         cat << EOF > ${CLIENT_CONFIG_PATH_IPV4}
 client
 dev tun
 proto tcp
-remote ${PUBLIC_IP} 443
+remote ${PUBLIC_IPV4} 443
 resolv-retry infinite
 nobind
 user nobody
@@ -244,7 +264,7 @@ remote-cert-tls server
 auth-user-pass
 cipher AES-256-CBC
 verb 3
-tun-mtu $VPN_MTU
+tun-mtu 1450
 <ca>
 $(sudo cat /etc/openvpn/ca.crt)
 </ca>
@@ -259,17 +279,19 @@ $(sudo cat /etc/openvpn/ta.key)
 </tls-auth>
 key-direction 1
 EOF
-        echo "OpenVPN client configuration for IPv4 available at ${CLIENT_CONFIG_PATH_IPV4}"
+
+        echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH_IPV4}."
+        echo "To download the configuration file, use the following scp command:"
+        echo "scp ${SUDO_USER}@${PUBLIC_IPV4}:${CLIENT_CONFIG_PATH_IPV4} ."
     fi
 
     # Generate the client configuration file for IPv6
     if [ "$CONFIG_CHOICE" -eq 2 ] || [ "$CONFIG_CHOICE" -eq 3 ]; then
-        CLIENT_CONFIG_PATH_IPV6="${USER_HOME}/client-${SERVER_NAME}-ipv6.ovpn"
         cat << EOF > ${CLIENT_CONFIG_PATH_IPV6}
 client
 dev tun
 proto tcp6
-remote ${PUBLIC_IP} 443
+remote ${PUBLIC_IPV6} 443
 resolv-retry infinite
 nobind
 user nobody
@@ -280,7 +302,7 @@ remote-cert-tls server
 auth-user-pass
 cipher AES-256-CBC
 verb 3
-tun-mtu $VPN_MTU
+tun-mtu 1450
 <ca>
 $(sudo cat /etc/openvpn/ca.crt)
 </ca>
@@ -295,31 +317,9 @@ $(sudo cat /etc/openvpn/ta.key)
 </tls-auth>
 key-direction 1
 EOF
-        echo "OpenVPN client configuration for IPv6 available at ${CLIENT_CONFIG_PATH_IPV6}"
+
+        echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH_IPV6}."
+        echo "To download the configuration file, use the following scp command:"
+        echo "scp ${SUDO_USER}@${PUBLIC_IPV6}:${CLIENT_CONFIG_PATH_IPV6} ."
     fi
-
-    # Configure IP forwarding
-    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-    sudo sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
-    sudo sysctl -p
-
-    # Set up firewall rules
-    sudo ufw allow 443/tcp
-    sudo ufw allow OpenSSH
-    sudo ufw disable
-    sudo ufw enable
-    sudo ufw allow routed
-
-    # Reload systemd configuration to pick up any changes
-    sudo systemctl daemon-reload
-
-    # Start and enable the OpenVPN service
-    sudo systemctl start openvpn@server-ipv4
-    sudo systemctl enable openvpn@server-ipv4
-    if [ "$CONFIG_CHOICE" -eq 2 ] || [ "$CONFIG_CHOICE" -eq 3 ]; then
-        sudo systemctl start openvpn@server-ipv6
-        sudo systemctl enable openvpn@server-ipv6
-    fi
-else
-    echo "Skipping client configuration generation in test mode."
 fi
