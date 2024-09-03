@@ -210,19 +210,26 @@ sudo ufw enable
 sudo ufw allow routed
 
 # Start and enable the OpenVPN service
-sudo systemctl start openvpn@server-ipv4
-sudo systemctl start openvpn@server-ipv6
-sudo systemctl enable openvpn@server-ipv4
-sudo systemctl enable openvpn@server-ipv6
+if [ "$CONFIG_CHOICE" == "1" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    sudo systemctl start openvpn@server-ipv4
+    sudo systemctl enable openvpn@server-ipv4
+fi
+
+if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    sudo systemctl start openvpn@server-ipv6
+    sudo systemctl enable openvpn@server-ipv6
+fi
 
 # Set the home directory for the client.ovpn file based on the user running the script
 USER_HOME=$(eval echo ~${SUDO_USER})
 PUBLIC_IP=$(curl -s ifconfig.me)
 SERVER_NAME=${PUBLIC_IP//./-}
-CLIENT_CONFIG_PATH="${USER_HOME}/client-${SERVER_NAME}.ovpn"
+CLIENT_CONFIG_PATH_IPV4="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
+CLIENT_CONFIG_PATH_IPV6="${USER_HOME}/client-${SERVER_NAME}-ipv6.ovpn"
 
-# Generate the client configuration file
-cat << EOF > ${CLIENT_CONFIG_PATH}
+# Generate the client configuration file for IPv4
+if [ "$CONFIG_CHOICE" == "1" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    cat << EOF > ${CLIENT_CONFIG_PATH_IPV4}
 client
 dev tun
 proto tcp
@@ -252,8 +259,51 @@ $(sudo cat /etc/openvpn/ta.key)
 </tls-auth>
 key-direction 1
 EOF
+fi
+
+# Generate the client configuration file for IPv6
+if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    cat << EOF > ${CLIENT_CONFIG_PATH_IPV6}
+client
+dev tun
+proto tcp
+remote ${PUBLIC_IP} 443
+resolv-retry infinite
+nobind
+user nobody
+group nogroup
+persist-key
+persist-tun
+remote-cert-tls server
+auth-user-pass
+cipher AES-256-CBC
+verb 3
+tun-mtu $VPN_MTU
+<ca>
+$(sudo cat /etc/openvpn/ca.crt)
+</ca>
+<cert>
+$(sudo cat /etc/openvpn/easy-rsa/pki/issued/client1.crt)
+</cert>
+<key>
+$(sudo cat /etc/openvpn/easy-rsa/pki/private/client1.key)
+</key>
+<tls-auth>
+$(sudo cat /etc/openvpn/ta.key)
+</tls-auth>
+key-direction 1
+EOF
+fi
 
 # Print out the location of the client configuration file and scp command
-echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
-echo "To download the configuration file, use the following scp command:"
-echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH} ."
+if [ "$CONFIG_CHOICE" == "1" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH_IPV4}."
+    echo "To download the configuration file, use the following scp command:"
+    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH_IPV4} ."
+fi
+
+if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH_IPV6}."
+    echo "To download the configuration file, use the following scp command:"
+    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH_IPV6} ."
+fi
