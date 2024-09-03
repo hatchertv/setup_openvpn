@@ -91,6 +91,23 @@ verify-client-cert none
 username-as-common-name
 EOF
 
+    # Create a custom systemd service file for IPv4
+    cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv4.service
+[Unit]
+Description=OpenVPN connection to server-ipv4
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv4.conf
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+Type=simple
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     # Enable and start the IPv4 OpenVPN service
     sudo systemctl enable openvpn@server-ipv4
     sudo systemctl start openvpn@server-ipv4
@@ -137,6 +154,23 @@ verify-client-cert none
 username-as-common-name
 EOF
 
+    # Create a custom systemd service file for IPv6
+    cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv6.service
+[Unit]
+Description=OpenVPN connection to server-ipv6
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv6.conf
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+Type=simple
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     # Enable and start the IPv6 OpenVPN service
     sudo systemctl enable openvpn@server-ipv6
     sudo systemctl start openvpn@server-ipv6
@@ -149,6 +183,8 @@ sudo systemctl disable openvpn@server
 # Clean up any existing OpenVPN configurations
 sudo rm -rf /etc/openvpn
 sudo rm -rf /var/log/openvpn*
+sudo rm -f /etc/systemd/system/openvpn@server-ipv4.service
+sudo rm -f /etc/systemd/system/openvpn@server-ipv6.service
 
 # Reinstall OpenVPN and install necessary tools
 sudo apt-get update
@@ -213,14 +249,15 @@ sudo sysctl -p
 # Set up firewall rules
 sudo ufw allow 443/tcp
 sudo ufw allow OpenSSH
-sudo ufw allow routed
 sudo ufw disable
 sudo ufw enable
+sudo ufw allow routed
 
 # Set the home directory for the client.ovpn file based on the user running the script
 USER_HOME=$(eval echo ~${SUDO_USER})
 PUBLIC_IP=$(curl -s ifconfig.me)
 SERVER_NAME=${PUBLIC_IP//./-}
+
 if [ "$CONFIG_CHOICE" == "1" ] || [ "$CONFIG_CHOICE" == "3" ]; then
     CLIENT_CONFIG_PATH_IPV4="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
     cat << EOF > ${CLIENT_CONFIG_PATH_IPV4}
