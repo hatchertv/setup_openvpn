@@ -2,13 +2,12 @@
 
 # Function to check for IPv4 availability
 check_ipv4_availability() {
-    IPV4_AVAILABLE=$(ip -4 addr show | grep inet | wc -l)
-
-    if [ "$IPV4_AVAILABLE" -gt 0 ]; then
-        echo "IPv4 is available."
-    else
+    IPV4_ADDRESS=$(ip -4 addr show | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n 1)
+    if [ -z "$IPV4_ADDRESS" ]; then
         echo "IPv4 is not available. Exiting."
         exit 1
+    else
+        echo "IPv4 is available at $IPV4_ADDRESS."
     fi
 }
 
@@ -103,15 +102,14 @@ configure_firewall() {
 # Function to generate the client configuration file
 generate_client_config() {
     USER_HOME=$(eval echo ~${SUDO_USER})
-    PUBLIC_IP=$(curl -s ifconfig.me)
-    SERVER_NAME=${PUBLIC_IP//./-}
+    SERVER_NAME=${IPV4_ADDRESS//./-}
     CLIENT_CONFIG_PATH="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
 
     cat << EOF > ${CLIENT_CONFIG_PATH}
 client
 dev tun
 proto tcp
-remote ${PUBLIC_IP} 443
+remote ${IPV4_ADDRESS} 443
 resolv-retry infinite
 nobind
 user nobody
@@ -140,7 +138,7 @@ EOF
 
     echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
     echo "To download the configuration file, use the following scp command:"
-    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH} ~/Downloads"
+    echo "scp ${SUDO_USER}@${IPV4_ADDRESS}:${CLIENT_CONFIG_PATH} ~/Downloads"
 }
 
 # Main script execution
