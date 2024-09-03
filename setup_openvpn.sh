@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Function to get the public IPv4 address
+# Function to get the primary IPv4 address using net-tools
 get_public_ipv4() {
-    IPV4_ADDRESS=$(curl -s ifconfig.me)
+    IPV4_ADDRESS=$(ifconfig $(ip -4 route | grep default | awk '{print $5}') | grep 'inet ' | awk '{print $2}')
     if [ -z "$IPV4_ADDRESS" ]; then
         echo "Failed to obtain public IPv4 address. Exiting."
         exit 1
@@ -135,10 +135,6 @@ $(sudo cat /etc/openvpn/ta.key)
 </tls-auth>
 key-direction 1
 EOF
-
-    echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
-    echo "To download the configuration file, use the following scp command:"
-    echo "scp ${SUDO_USER}@${IPV4_ADDRESS}:${CLIENT_CONFIG_PATH} ~/Downloads"
 }
 
 # Main script execution
@@ -149,11 +145,11 @@ get_public_ipv4
 configure_openvpn_ipv4
 configure_ip_forwarding
 configure_firewall
-
-# Start the OpenVPN service
-sudo systemctl daemon-reload
 sudo systemctl start openvpn@server-ipv4
 sudo systemctl enable openvpn@server-ipv4
-
-# Generate the client configuration file
 generate_client_config
+
+# Print out the location of the client configuration file and scp command
+echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
+echo "To download the configuration file, use the following scp command:"
+echo "scp ${SUDO_USER}@${IPV4_ADDRESS}:${CLIENT_CONFIG_PATH} ~/Downloads"
