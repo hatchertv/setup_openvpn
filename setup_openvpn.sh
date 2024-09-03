@@ -25,6 +25,11 @@ prompt_user_for_config() {
     echo "2. IPv6"
     echo "3. Both IPv4 and IPv6"
     read -p "Enter your choice (1/2/3): " CONFIG_CHOICE
+
+    echo "Do you want to run OpenVPN in the foreground for testing?"
+    echo "1. Yes"
+    echo "2. No (Default)"
+    read -p "Enter your choice (1/2): " RUN_IN_FOREGROUND
 }
 
 # Function to configure OpenVPN based on user choice
@@ -91,26 +96,42 @@ verify-client-cert none
 username-as-common-name
 EOF
 
-    # Create a custom systemd service file for IPv4
-    cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv4.service
+    # Create the systemd service file for IPv4
+    if [ "$RUN_IN_FOREGROUND" == "1" ]; then
+        cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv4.service
 [Unit]
 Description=OpenVPN connection to server-ipv4
 After=network.target
 
 [Service]
-ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv4.conf
+ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv4.conf --log /var/log/openvpn-ipv4.log
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 Type=simple
 KillMode=process
+PrivateTmp=no
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    else
+        cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv4.service
+[Unit]
+Description=OpenVPN connection to server-ipv4
+After=network.target
 
-    # Enable and start the IPv4 OpenVPN service
-    sudo systemctl enable openvpn@server-ipv4
-    sudo systemctl start openvpn@server-ipv4
+[Service]
+ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv4.conf --daemon
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+Type=simple
+KillMode=process
+PrivateTmp=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
 }
 
 # Function to configure OpenVPN for IPv6
@@ -154,26 +175,42 @@ verify-client-cert none
 username-as-common-name
 EOF
 
-    # Create a custom systemd service file for IPv6
-    cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv6.service
+    # Create the systemd service file for IPv6
+    if [ "$RUN_IN_FOREGROUND" == "1" ]; then
+        cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv6.service
 [Unit]
 Description=OpenVPN connection to server-ipv6
 After=network.target
 
 [Service]
-ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv6.conf
+ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv6.conf --log /var/log/openvpn-ipv6.log
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 Type=simple
 KillMode=process
+PrivateTmp=no
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    else
+        cat << EOF | sudo tee /etc/systemd/system/openvpn@server-ipv6.service
+[Unit]
+Description=OpenVPN connection to server-ipv6
+After=network.target
 
-    # Enable and start the IPv6 OpenVPN service
-    sudo systemctl enable openvpn@server-ipv6
-    sudo systemctl start openvpn@server-ipv6
+[Service]
+ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server-ipv6.conf --daemon
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+Type=simple
+KillMode=process
+PrivateTmp=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
 }
 
 # Stop and disable the OpenVPN service if running
@@ -183,8 +220,6 @@ sudo systemctl disable openvpn@server
 # Clean up any existing OpenVPN configurations
 sudo rm -rf /etc/openvpn
 sudo rm -rf /var/log/openvpn*
-sudo rm -f /etc/systemd/system/openvpn@server-ipv4.service
-sudo rm -f /etc/systemd/system/openvpn@server-ipv6.service
 
 # Reinstall OpenVPN and install necessary tools
 sudo apt-get update
@@ -253,13 +288,33 @@ sudo ufw disable
 sudo ufw enable
 sudo ufw allow routed
 
-# Set the home directory for the client.ovpn file based on the user running the script
-USER_HOME=$(eval echo ~${SUDO_USER})
-PUBLIC_IP=$(curl -s ifconfig.me)
-SERVER_NAME=${PUBLIC_IP//./-}
+# Start and enable the OpenVPN services
+sudo systemctl start openvpn@server-ipv4
+if [ $? -ne 0 ]; then
+    echo "Error starting OpenVPN service for IPv4"
+fi
 
-if [ "$CONFIG_CHOICE" == "1" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    sudo systemctl start openvpn@server-ipv6
+    if [ $? -ne 0 ]; then
+        echo "Error starting OpenVPN service for IPv6"
+    fi
+fi
+
+sudo systemctl enable openvpn@server-ipv4
+if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+    sudo systemctl enable openvpn@server-ipv6
+fi
+
+if [ "$RUN_IN_FOREGROUND" == "2" ]; then
+    # Set the home directory for the client.ovpn file based on the user running the script
+    USER_HOME=$(eval echo ~${SUDO_USER})
+    PUBLIC_IP=$(curl -s ifconfig.me)
+    SERVER_NAME=${PUBLIC_IP//./-}
     CLIENT_CONFIG_PATH_IPV4="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
+    CLIENT_CONFIG_PATH_IPV6="${USER_HOME}/client-${SERVER_NAME}-ipv6.ovpn"
+
+    # Generate the client configuration file for IPv4
     cat << EOF > ${CLIENT_CONFIG_PATH_IPV4}
 client
 dev tun
@@ -290,13 +345,9 @@ $(sudo cat /etc/openvpn/ta.key)
 </tls-auth>
 key-direction 1
 EOF
-    echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH_IPV4}."
-    echo "To download the configuration file, use the following scp command:"
-    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH_IPV4} ."
-fi
 
-if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
-    CLIENT_CONFIG_PATH_IPV6="${USER_HOME}/client-${SERVER_NAME}-ipv6.ovpn"
+    # Generate the client configuration file for IPv6 if selected
+    if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
     cat << EOF > ${CLIENT_CONFIG_PATH_IPV6}
 client
 dev tun
@@ -327,7 +378,16 @@ $(sudo cat /etc/openvpn/ta.key)
 </tls-auth>
 key-direction 1
 EOF
-    echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH_IPV6}."
+    fi
+
+    # Print out the location of the client configuration files and scp command
+    echo "OpenVPN server setup complete. The client configuration file for IPv4 is available as ${CLIENT_CONFIG_PATH_IPV4}."
     echo "To download the configuration file, use the following scp command:"
-    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH_IPV6} ."
+    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH_IPV4} ."
+
+    if [ "$CONFIG_CHOICE" == "2" ] || [ "$CONFIG_CHOICE" == "3" ]; then
+        echo "OpenVPN server setup complete. The client configuration file for IPv6 is available as ${CLIENT_CONFIG_PATH_IPV6}."
+        echo "To download the configuration file, use the following scp command:"
+        echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH_IPV6} ."
+    fi
 fi
