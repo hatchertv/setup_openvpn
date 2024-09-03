@@ -133,7 +133,7 @@ remote-cert-tls server
 auth-user-pass
 cipher AES-256-CBC
 verb 3
-mtu $MTU
+tun-mtu $MTU
 mssfix $((MTU-40))
 <ca>
 $(sudo cat /etc/openvpn/ca.crt)
