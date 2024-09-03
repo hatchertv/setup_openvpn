@@ -10,7 +10,7 @@ sudo rm -rf /var/log/openvpn*
 
 # Reinstall OpenVPN to ensure a clean installation
 sudo apt-get update
-sudo apt-get install -y openvpn easy-rsa
+sudo apt-get install -y openvpn easy-rsa curl
 
 # Set up the OpenVPN server configuration directory
 sudo mkdir -p /etc/openvpn
@@ -54,11 +54,20 @@ fi
 # Move generated keys and certificates to the OpenVPN directory
 sudo cp pki/ca.crt pki/dh.pem pki/issued/server.crt pki/private/server.key /etc/openvpn/
 
-# Calculate the optimal MTU for the server
-MTU=$(ping -c 1 -M do -s 1432 google.com 2>/dev/null | grep -oP '(?<=MTU\s)\d+')
-if [ -z "$MTU" ]; then
-    MTU=1400  # Fallback MTU if the calculation fails
+# Get the public IP of the server and replace dots with dashes
+PUBLIC_IP=$(curl -s http://checkip.amazonaws.com)
+PUBLIC_IP_DASHED=${PUBLIC_IP//./-}
+
+# Get the username of the person running the script
+if [ "$SUDO_USER" ]; then 
+  USER=$SUDO_USER
+else 
+  USER=$(whoami)
 fi
+
+# Set the home directory for the client.ovpn file based on the user running the script
+USER_HOME=$(eval echo ~$USER)
+CLIENT_CONFIG_PATH="${USER_HOME}/client-${PUBLIC_IP_DASHED}-$(date +%s).ovpn"
 
 # Create the server configuration file
 cat << EOF | sudo tee /etc/openvpn/server.conf
@@ -66,22 +75,17 @@ port 443
 proto tcp
 dev tun
 topology subnet
-local $(curl -s http://checkip.amazonaws.com)  # Automatically determine the public IP address
 ca ca.crt
 cert server.crt
 key server.key
 dh dh.pem
 tls-auth ta.key 0
 server 10.8.0.0 255.255.255.0
-tun-mtu $MTU
-mssfix $((MTU-40))
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 8.8.8.8"
 push "dhcp-option DNS 8.8.4.4"
-push "mtu $MTU"
-push "mssfix $((MTU-40))"
 keepalive 10 120
-data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC
+tun-mtu 1432  # Adjust MTU size
 user nobody
 group nogroup
 persist-key
@@ -113,18 +117,15 @@ if [ $? -ne 0 ]; then
 fi
 sudo systemctl enable openvpn@server
 
-# Set the home directory for the client.ovpn file based on the user running the script
-USER_HOME=$(eval echo ~${SUDO_USER})
-CLIENT_CONFIG_PATH="${USER_HOME}/$(hostname -s)_client.ovpn"
-
 # Generate the client configuration file
 cat << EOF > ${CLIENT_CONFIG_PATH}
 client
 dev tun
 proto tcp
-remote $(curl -s http://checkip.amazonaws.com) 443
+remote ${PUBLIC_IP} 443
 resolv-retry infinite
 nobind
+tun-mtu 1432  # Match server MTU size
 user nobody
 group nogroup
 persist-key
@@ -133,8 +134,6 @@ remote-cert-tls server
 auth-user-pass
 cipher AES-256-CBC
 verb 3
-tun-mtu $MTU
-mssfix $((MTU-40))
 <ca>
 $(sudo cat /etc/openvpn/ca.crt)
 </ca>
@@ -150,7 +149,9 @@ $(sudo cat /etc/openvpn/ta.key)
 key-direction 1
 EOF
 
-# Print out the location of the client configuration file and SCP command
+# Print out the location of the client configuration file
 echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
-echo "You can download it using the following SCP command:"
-echo "scp ${USER}@$(curl -s http://checkip.amazonaws.com):${CLIENT_CONFIG_PATH} ."
+
+# Provide the SCP command for easy download
+echo "You can download the client configuration file with the following command:"
+echo "scp ${USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH} ."
