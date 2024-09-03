@@ -4,7 +4,7 @@ To deploy follow the following steps with a sudo enabled user:
 
 git clone https://github.com/hatchertv/setup_openvpn.git
 
-cd /setup_openvpn
+cd setup_openvpn/
 
 sudo chmod +x setup_openvpn.sh
 
