@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# Function to check for IPv4 availability
-check_ipv4_availability() {
-    IPV4_ADDRESS=$(ip -4 addr show | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n 1)
+# Function to get the public IPv4 address
+get_public_ipv4() {
+    IPV4_ADDRESS=$(curl -s ifconfig.me)
     if [ -z "$IPV4_ADDRESS" ]; then
-        echo "IPv4 is not available. Exiting."
+        echo "Failed to obtain public IPv4 address. Exiting."
         exit 1
     else
-        echo "IPv4 is available at $IPV4_ADDRESS."
+        echo "Public IPv4 address is $IPV4_ADDRESS."
     fi
 }
 
@@ -145,7 +145,7 @@ EOF
 cleanup_openvpn
 install_openvpn
 setup_pki
-check_ipv4_availability
+get_public_ipv4
 configure_openvpn_ipv4
 configure_ip_forwarding
 configure_firewall
