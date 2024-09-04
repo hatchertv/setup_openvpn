@@ -1,11 +1,5 @@
 #!/bin/bash
 
-# Ensure the script is run as root
-if [[ "$EUID" -ne 0 ]]; then
-  echo "Please run as root."
-  exit 1
-fi
-
 # Stop and disable the OpenVPN service if running
 sudo systemctl stop openvpn@server
 sudo systemctl disable openvpn@server
@@ -16,7 +10,7 @@ sudo rm -rf /var/log/openvpn*
 
 # Reinstall OpenVPN and install necessary tools
 sudo apt-get update
-sudo apt-get install -y openvpn easy-rsa net-tools ufw
+sudo apt-get install -y openvpn easy-rsa net-tools iptables-persistent
 
 # Determine the primary interface and its MTU
 PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}')
@@ -53,7 +47,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Generate a shared TLS key for HMAC authentication
-sudo openvpn --genkey secret /etc/openvpn/ta.key
+sudo openvpn --genkey --secret /etc/openvpn/ta.key
 if [ $? -ne 0 ]; then
     echo "Error generating TLS key"
     exit 1
@@ -105,6 +99,17 @@ echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
 sudo sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
 sudo sysctl -p
 
+# Load necessary kernel modules for iptables and NAT
+sudo modprobe ip_tables
+sudo modprobe iptable_nat
+sudo modprobe nf_nat
+
+# Apply NAT rule in iptables to allow traffic to pass through the VPN
+sudo iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o $PRIMARY_INTERFACE -j MASQUERADE
+
+# Save iptables rules so they persist on reboot
+sudo netfilter-persistent save
+
 # Set up firewall rules to allow VPN and routed traffic
 sudo ufw allow 443/tcp
 sudo ufw allow OpenSSH
@@ -143,7 +148,6 @@ persist-key
 persist-tun
 remote-cert-tls server
 auth-user-pass
-data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 verb 3
 <ca>
 $(sudo cat /etc/openvpn/ca.crt)
