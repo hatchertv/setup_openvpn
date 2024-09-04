@@ -1,29 +1,27 @@
 #!/bin/bash
 
-# Function to get the primary IPv4 address using net-tools
-get_public_ipv4() {
-    IPV4_ADDRESS=$(ifconfig $(ip -4 route | grep default | awk '{print $5}') | grep 'inet ' | awk '{print $2}')
-    if [ -z "$IPV4_ADDRESS" ]; then
-        echo "Failed to obtain public IPv4 address. Exiting."
+# Function to determine the primary network interface
+determine_primary_interface() {
+    PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}')
+    if [ -z "$PRIMARY_INTERFACE" ]; then
+        echo "Error: Unable to determine the primary network interface."
         exit 1
     else
-        echo "Public IPv4 address is $IPV4_ADDRESS."
+        echo "Primary Network Interface: $PRIMARY_INTERFACE"
     fi
 }
 
-# Function to configure OpenVPN for IPv4
-configure_openvpn_ipv4() {
-    # Determine the primary IPv4 interface and its MTU
-    PRIMARY_INTERFACE=$(ip -4 route | grep default | awk '{print $5}')
+# Function to configure OpenVPN server
+configure_openvpn_server() {
+    # Get the MTU from the primary interface
     PRIMARY_MTU=$(ifconfig $PRIMARY_INTERFACE | grep -i mtu | awk '{print $4}')
     VPN_MTU=$((PRIMARY_MTU - 50))
 
-    echo "Primary IPv4 Interface: $PRIMARY_INTERFACE"
-    echo "Primary IPv4 MTU: $PRIMARY_MTU"
-    echo "VPN IPv4 MTU: $VPN_MTU"
+    echo "Primary MTU: $PRIMARY_MTU"
+    echo "VPN MTU: $VPN_MTU"
 
-    # Create the server configuration file for IPv4
-    cat << EOF | sudo tee /etc/openvpn/server-ipv4.conf
+    # Create the OpenVPN server configuration file
+    cat << EOF | sudo tee /etc/openvpn/server.conf
 port 443
 proto tcp
 dev tun
@@ -44,8 +42,8 @@ user nobody
 group nogroup
 persist-key
 persist-tun
-status /var/log/openvpn-status-ipv4.log
-log /var/log/openvpn-ipv4.log
+status /var/log/openvpn-status.log
+log /var/log/openvpn.log
 verb 6
 plugin /usr/lib/openvpn/openvpn-plugin-auth-pam.so login
 verify-client-cert none
@@ -53,63 +51,86 @@ username-as-common-name
 EOF
 }
 
-# Function to clean up previous OpenVPN configurations
-cleanup_openvpn() {
-    sudo systemctl stop openvpn@server-ipv4
-    sudo systemctl disable openvpn@server-ipv4
+# Function to configure IP forwarding and NAT
+configure_routing() {
+    echo "Enabling IP forwarding..."
+    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+    sudo sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
+    sudo sysctl -p
+
+    echo "Configuring firewall rules..."
+    sudo iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o $PRIMARY_INTERFACE -j MASQUERADE
+    sudo iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+    sudo iptables -A FORWARD -s 10.8.0.0/24 -j ACCEPT
+
+    # Save the iptables rules
+    sudo apt-get install -y iptables-persistent
+    sudo netfilter-persistent save
+}
+
+# Function to install and configure OpenVPN
+install_openvpn() {
+    # Stop and disable OpenVPN if it's running
+    sudo systemctl stop openvpn@server
+    sudo systemctl disable openvpn@server
+
+    # Clean up any existing OpenVPN configuration
     sudo rm -rf /etc/openvpn
     sudo rm -rf /var/log/openvpn*
-}
 
-# Function to reinstall OpenVPN
-install_openvpn() {
+    # Install OpenVPN and Easy-RSA
     sudo apt-get update
-    sudo apt-get install -y openvpn easy-rsa net-tools
-}
+    sudo apt-get install -y openvpn easy-rsa
 
-# Function to set up the PKI and generate keys
-setup_pki() {
+    # Set up the OpenVPN server configuration directory
     sudo mkdir -p /etc/openvpn
     sudo cp -r /usr/share/easy-rsa /etc/openvpn/easy-rsa
     cd /etc/openvpn/easy-rsa
 
+    # Initialize the PKI (Public Key Infrastructure)
     sudo ./easyrsa init-pki
+
+    # Build the Certificate Authority (CA)
     sudo ./easyrsa --batch build-ca nopass
+
+    # Generate the server certificate and key
     sudo ./easyrsa build-server-full server nopass
+
+    # Generate Diffie-Hellman parameters
     sudo ./easyrsa gen-dh
+
+    # Generate a shared TLS key for HMAC authentication
     sudo openvpn --genkey --secret /etc/openvpn/ta.key
+
+    # Generate client certificate and key
     sudo ./easyrsa build-client-full client1 nopass
 
+    # Move generated keys and certificates to the OpenVPN directory
     sudo cp pki/ca.crt pki/dh.pem pki/issued/server.crt pki/private/server.key /etc/openvpn/
+
+    # Configure OpenVPN server
+    configure_openvpn_server
+
+    # Configure routing
+    configure_routing
+
+    # Enable and start the OpenVPN service
+    sudo systemctl start openvpn@server
+    sudo systemctl enable openvpn@server
 }
 
-# Function to configure IP forwarding
-configure_ip_forwarding() {
-    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-    sudo sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
-    sudo sysctl -p
-}
-
-# Function to configure the firewall
-configure_firewall() {
-    sudo ufw allow 443/tcp
-    sudo ufw allow OpenSSH
-    sudo ufw disable
-    sudo ufw enable
-    sudo ufw allow routed
-}
-
-# Function to generate the client configuration file
-generate_client_config() {
+# Function to create the client config file
+create_client_config() {
     USER_HOME=$(eval echo ~${SUDO_USER})
-    SERVER_NAME=${IPV4_ADDRESS//./-}
-    CLIENT_CONFIG_PATH="${USER_HOME}/client-${SERVER_NAME}-ipv4.ovpn"
+    PUBLIC_IP=$(curl -s ifconfig.me)
+    CLIENT_CONFIG_PATH="${USER_HOME}/client-${PUBLIC_IP//./-}-ipv4.ovpn"
 
+    # Generate the client configuration file
     cat << EOF > ${CLIENT_CONFIG_PATH}
 client
 dev tun
 proto tcp
-remote ${IPV4_ADDRESS} 443
+remote ${PUBLIC_IP} 443
 resolv-retry infinite
 nobind
 user nobody
@@ -135,21 +156,24 @@ $(sudo cat /etc/openvpn/ta.key)
 </tls-auth>
 key-direction 1
 EOF
+
+    # Print out the location of the client configuration file
+    echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
+    echo "To download the configuration file, use the following scp command:"
+    echo "scp ${SUDO_USER}@${PUBLIC_IP}:${CLIENT_CONFIG_PATH} ."
 }
 
-# Main script execution
-cleanup_openvpn
-install_openvpn
-setup_pki
-get_public_ipv4
-configure_openvpn_ipv4
-configure_ip_forwarding
-configure_firewall
-sudo systemctl start openvpn@server-ipv4
-sudo systemctl enable openvpn@server-ipv4
-generate_client_config
+# Main function
+main() {
+    # Determine the primary network interface
+    determine_primary_interface
 
-# Print out the location of the client configuration file and scp command
-echo "OpenVPN server setup complete. The client configuration file is available as ${CLIENT_CONFIG_PATH}."
-echo "To download the configuration file, use the following scp command:"
-echo "scp ${SUDO_USER}@${IPV4_ADDRESS}:${CLIENT_CONFIG_PATH} ~/Downloads"
+    # Install and configure OpenVPN
+    install_openvpn
+
+    # Create the client configuration file
+    create_client_config
+}
+
+# Execute main function
+main
