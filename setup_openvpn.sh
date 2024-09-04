@@ -1,214 +1,167 @@
 #!/bin/bash
 
+# This script sets up an OpenVPN server on any Linux machine, generates the necessary certificates, keys, and configuration files, and creates a client .ovpn file.
+
+# Fail on any error
+set -e
+
 # Define variables
-VPN_PORT=${VPN_PORT:-443}
-VPN_PROTOCOL=${VPN_PROTOCOL:-tcp}
-VPN_CIPHER=${VPN_CIPHER:-AES-256-GCM}
-VPN_MTU=${VPN_MTU:-1500}
-VPN_SUBNET="10.8.0.0/24"
-VPN_INTERFACE="tun0"
+OVPN_DIR="/etc/openvpn"
 EASYRSA_DIR="/etc/openvpn/easy-rsa"
+KEY_DIR="/etc/openvpn/keys"
+CLIENT_DIR="$HOME/client-configs"
 CLIENT_NAME="client"
+PORT=443
+PROTO="tcp"
 
-# Check if OpenVPN is installed
-if ! command -v openvpn &> /dev/null; then
-    echo "Installing OpenVPN..."
-    sudo apt-get update && sudo apt-get install -y openvpn easy-rsa
-else
-    echo "OpenVPN and EasyRSA are already installed."
-fi
-
-# Ensure port is available (e.g., 443)
-check_port_in_use() {
-    if lsof -i :$VPN_PORT &> /dev/null; then
-        echo "Port $VPN_PORT is in use, stopping conflicting service..."
-        PID=$(lsof -ti :$VPN_PORT)
-        kill $PID
-    fi
+# Install OpenVPN and EasyRSA
+install_openvpn() {
+    echo "Installing OpenVPN and EasyRSA..."
+    sudo apt-get update
+    sudo apt-get install -y openvpn easy-rsa
 }
 
-check_port_in_use
+# Generate server keys and certificates
+generate_server_keys() {
+    echo "Generating server keys and certificates..."
 
-# Clean up previous configurations
-clean_old_config() {
-    echo "Cleaning up old VPN configurations..."
-    sudo rm -rf /etc/openvpn/server.conf
-    sudo rm -rf /etc/openvpn/*.log
+    # Setup EasyRSA
+    make-cadir "$EASYRSA_DIR"
+    cd "$EASYRSA_DIR"
+
+    # Initialize the PKI, build CA and server certificate
+    ./easyrsa init-pki
+    ./easyrsa build-ca nopass
+    ./easyrsa gen-req server nopass
+    ./easyrsa sign-req server server
+
+    # Generate Diffie-Hellman key
+    ./easyrsa gen-dh
+
+    # Generate TLS-Auth key for extra security
+    openvpn --genkey --secret "$KEY_DIR/ta.key"
+
+    # Copy keys to OpenVPN directory
+    cp pki/ca.crt pki/private/server.key pki/issued/server.crt "$KEY_DIR"
+    cp pki/dh.pem "$KEY_DIR/dh.pem"
 }
 
-clean_old_config
+# Generate client certificates
+generate_client_keys() {
+    echo "Generating client keys..."
 
-# Enable IP forwarding
-enable_ip_forwarding() {
-    echo "Enabling IP forwarding..."
-    sudo sysctl -w net.ipv4.ip_forward=1
-    sudo sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
-    echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+    cd "$EASYRSA_DIR"
+    ./easyrsa gen-req "$CLIENT_NAME" nopass
+    ./easyrsa sign-req client "$CLIENT_NAME"
+
+    # Copy client keys to client-configs directory
+    mkdir -p "$CLIENT_DIR"
+    cp pki/ca.crt pki/issued/"$CLIENT_NAME.crt" pki/private/"$CLIENT_NAME.key" "$CLIENT_DIR"
 }
 
-enable_ip_forwarding
+# Configure OpenVPN server
+configure_server() {
+    echo "Configuring OpenVPN server..."
 
-# Set up firewall rules
-configure_firewall() {
-    echo "Configuring firewall..."
-    sudo iptables -F
-    sudo iptables -t nat -F
-    sudo iptables -t nat -A POSTROUTING -s $VPN_SUBNET -o enp1s0 -j MASQUERADE
-    sudo iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-    sudo iptables -A FORWARD -s $VPN_SUBNET -o enp1s0 -j ACCEPT
-    sudo iptables -A FORWARD -o $VPN_INTERFACE -i enp1s0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-    sudo iptables-save | sudo tee /etc/iptables/rules.v4
-}
-
-configure_firewall
-
-# Create OpenVPN server config
-create_server_config() {
-    echo "Creating OpenVPN server configuration..."
-    sudo tee /etc/openvpn/server.conf > /dev/null <<EOL
-port $VPN_PORT
-proto $VPN_PROTOCOL
-dev $VPN_INTERFACE
-tun-mtu $VPN_MTU
-topology subnet
+    # Create server.conf
+    cat <<EOF > "$OVPN_DIR/server.conf"
+port $PORT
+proto $PROTO
+dev tun
+ca $KEY_DIR/ca.crt
+cert $KEY_DIR/server.crt
+key $KEY_DIR/server.key
+dh $KEY_DIR/dh.pem
+tls-auth $KEY_DIR/ta.key 0
 server 10.8.0.0 255.255.255.0
-keepalive 10 120
-persist-key
-persist-tun
-user nobody
-group nogroup
-cipher $VPN_CIPHER
-data-ciphers AES-256-GCM:AES-128-GCM
-status /var/log/openvpn-status.log
-log /var/log/openvpn.log
-verb 3
-plugin /usr/lib/openvpn/openvpn-plugin-auth-pam.so login
-verify-client-cert none
-username-as-common-name
-client-to-client
-push "redirect-gateway def1"
+ifconfig-pool-persist $OVPN_DIR/ipp.txt
+push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 8.8.8.8"
 push "dhcp-option DNS 8.8.4.4"
-EOL
+keepalive 10 120
+cipher AES-256-CBC
+user nobody
+group nogroup
+persist-key
+persist-tun
+status $OVPN_DIR/openvpn-status.log
+log-append $OVPN_DIR/openvpn.log
+verb 3
+EOF
 }
 
-create_server_config
+# Enable IP forwarding and configure firewall
+setup_firewall() {
+    echo "Setting up firewall and IP forwarding..."
 
-# Set up CA, keys, and certificates (with EasyRSA)
-setup_certificates() {
-    echo "Setting up certificates with EasyRSA..."
-    
-    # Install EasyRSA if not already installed
-    if [ ! -d "$EASYRSA_DIR" ]; then
-        sudo mkdir -p "$EASYRSA_DIR"
-        sudo ln -s /usr/share/easy-rsa/* "$EASYRSA_DIR/"
-    fi
+    # Enable IP forwarding
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
+    sysctl -p
 
-    # Initialize the PKI
-    cd $EASYRSA_DIR
-    sudo ./easyrsa init-pki
-
-    # Build CA
-    sudo ./easyrsa build-ca nopass <<EOF
-MyOpenVPNCA
-EOF
-
-    # Create server key and certificate
-    sudo ./easyrsa gen-req server nopass
-    sudo ./easyrsa sign-req server server <<EOF
-yes
-EOF
-
-    # Generate Diffie-Hellman parameters
-    sudo ./easyrsa gen-dh
-
-    # Generate the TLS-Auth key (optional but recommended)
-    sudo openvpn --genkey --secret ta.key
-
-    # Move files to OpenVPN directory
-    sudo cp pki/ca.crt pki/private/server.key pki/issued/server.crt pki/dh.pem ta.key /etc/openvpn/
+    # Configure iptables
+    iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
+    iptables-save > /etc/iptables/rules.v4
 }
 
-setup_certificates
+# Create client configuration file
+create_client_config() {
+    echo "Creating client configuration file..."
 
-# Generate client .ovpn file
-generate_client_ovpn() {
-    echo "Generating client .ovpn configuration..."
-
-    # Create client key and certificate
-    sudo ./easyrsa gen-req $CLIENT_NAME nopass
-    sudo ./easyrsa sign-req client $CLIENT_NAME <<EOF
-yes
-EOF
-
-    # Generate the client .ovpn file
-    CLIENT_CONFIG="/home/$USER/${CLIENT_NAME}.ovpn"
-    sudo tee $CLIENT_CONFIG > /dev/null <<EOL
+    cat <<EOF > "$CLIENT_DIR/$CLIENT_NAME.ovpn"
 client
 dev tun
-proto $VPN_PROTOCOL
-remote $(curl -s ifconfig.me) $VPN_PORT
+proto $PROTO
+remote $(curl -s ifconfig.me) $PORT
 resolv-retry infinite
 nobind
 persist-key
 persist-tun
-cipher $VPN_CIPHER
-data-ciphers AES-256-GCM:AES-128-GCM
-verb 3
-auth-user-pass
-
-<ca>
-$(sudo cat /etc/openvpn/ca.crt)
-</ca>
-
-<cert>
-$(sudo cat pki/issued/${CLIENT_NAME}.crt)
-</cert>
-
-<key>
-$(sudo cat pki/private/${CLIENT_NAME}.key)
-</key>
-
+remote-cert-tls server
+cipher AES-256-CBC
 key-direction 1
+auth SHA256
+<ca>
+$(cat "$CLIENT_DIR/ca.crt")
+</ca>
+<cert>
+$(cat "$CLIENT_DIR/$CLIENT_NAME.crt")
+</cert>
+<key>
+$(cat "$CLIENT_DIR/$CLIENT_NAME.key")
+</key>
 <tls-auth>
-$(sudo cat /etc/openvpn/ta.key)
+$(cat "$KEY_DIR/ta.key")
 </tls-auth>
-EOL
-
-    echo "Client configuration file generated: $CLIENT_CONFIG"
+EOF
 }
 
-generate_client_ovpn
-
-# Restart OpenVPN
-restart_openvpn() {
-    echo "Restarting OpenVPN service..."
-    sudo systemctl daemon-reload
-    sudo systemctl restart openvpn@server
-    sudo systemctl enable openvpn@server
+# Start OpenVPN server
+start_openvpn_server() {
+    echo "Starting OpenVPN server..."
+    systemctl start openvpn@server
+    systemctl enable openvpn@server
 }
 
-restart_openvpn
-
-# Final check if OpenVPN is running correctly
-check_openvpn_status() {
-    if systemctl is-active --quiet openvpn@server; then
-        echo "OpenVPN is running successfully!"
-    else
-        echo "OpenVPN failed to start. Check logs."
-        sudo journalctl -xeu openvpn@server
-    fi
-}
-
-check_openvpn_status
-
-# Provide SCP command to download client .ovpn
-provide_scp_command() {
-    IP_ADDRESS=$(curl -s ifconfig.me)
+# Output instructions
+output_instructions() {
+    echo "OpenVPN server setup complete."
+    echo "Client configuration file is located at $CLIENT_DIR/$CLIENT_NAME.ovpn."
     echo "To download the client configuration file, use the following command:"
-    echo "scp $USER@$IP_ADDRESS:/home/$USER/${CLIENT_NAME}.ovpn ~/Downloads"
+    echo "scp $USER@$(curl -s ifconfig.me):$CLIENT_DIR/$CLIENT_NAME.ovpn ~/Downloads"
 }
 
-provide_scp_command
+# Main function
+main() {
+    install_openvpn
+    generate_server_keys
+    generate_client_keys
+    configure_server
+    setup_firewall
+    create_client_config
+    start_openvpn_server
+    output_instructions
+}
 
-echo "Setup complete."
+# Run the script
+main
